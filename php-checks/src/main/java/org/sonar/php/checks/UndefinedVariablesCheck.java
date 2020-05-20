@@ -19,7 +19,123 @@
  */
 package org.sonar.php.checks;
 
-import org.sonar.plugins.php.api.visitors.PHPVisitorCheck;
+import com.google.common.collect.ImmutableList;
+import org.sonar.php.cfg.LiveVariablesAnalysis;
+import org.sonar.php.checks.utils.CheckUtils;
+import org.sonar.php.tree.TreeUtils;
+import org.sonar.php.tree.symbols.Scope;
+import org.sonar.plugins.php.api.cfg.CfgBlock;
+import org.sonar.plugins.php.api.cfg.ControlFlowGraph;
+import org.sonar.plugins.php.api.symbols.Symbol;
+import org.sonar.plugins.php.api.symbols.SymbolTable;
+import org.sonar.plugins.php.api.tree.Tree;
+import org.sonar.plugins.php.api.tree.expression.VariableIdentifierTree;
+import org.sonar.plugins.php.api.tree.statement.GlobalStatementTree;
+import org.sonar.plugins.php.api.visitors.PHPSubscriptionCheck;
+import org.sonar.plugins.php.api.visitors.PHPTreeSubscriber;
 
-public class UndefinedVariablesCheck extends PHPVisitorCheck {
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class UndefinedVariablesCheck extends PHPSubscriptionCheck {
+  Map<CfgBlock, Symbol> cfgBlocksGlobalBinds = new HashMap<>();
+
+
+  @Override
+  public List<Tree.Kind> nodesToVisit() {
+    return ImmutableList.of(Tree.Kind.FUNCTION_DECLARATION, Tree.Kind.METHOD_DECLARATION);
+  }
+
+  @Override
+  public void visitNode(Tree tree) {
+    ControlFlowGraph cfg = ControlFlowGraph.build(tree, context());
+    if (cfg == null) {
+      return;
+    }
+
+    Scope scope = context().symbolTable().getScopeFor(tree);
+    if (scope == null) {
+      return;
+    }
+
+    LiveVariablesAnalysis lva = LiveVariablesAnalysis.analyze(cfg, context().symbolTable());
+
+    for (CfgBlock block: cfg.blocks()) {
+      checkBlock(block, lva);
+    }
+  }
+
+  private void checkBlock(CfgBlock block, LiveVariablesAnalysis lva) {
+    Set<Symbol> blockDeclaredSymbols = new HashSet<>();
+
+    for (Tree statement: block.elements()) {
+      if (statement.is(Tree.Kind.GLOBAL_STATEMENT)) {
+        ((GlobalStatementTree)statement).variables().stream()
+          .filter(v -> v.is(Tree.Kind.VARIABLE_IDENTIFIER))
+          .forEach(v -> cfgBlocksGlobalBinds.put(block, context().symbolTable().getSymbol(v)));
+      }
+
+      Map<Symbol, LiveVariablesAnalysis.VariableUsage> usagesInElement = lva.getLiveVariables(block).getVariableUsages(statement);
+      for (Map.Entry<Symbol, LiveVariablesAnalysis.VariableUsage> symbolWithUsage : usagesInElement.entrySet()) {
+        if (symbolWithUsage.getValue().isRead() && !symbolWithUsage.getValue().isWrite() &&
+          !blockDeclaredSymbols.contains(symbolWithUsage.getKey()) && !isSymbolDefinedInBlockPredecessors(symbolWithUsage.getKey(), block, lva)) {
+          reportUndefinedVariable(symbolWithUsage.getKey(), statement);
+        } else if (symbolWithUsage.getValue().isWrite()) {
+          blockDeclaredSymbols.add(symbolWithUsage.getKey());
+        }
+      }
+    }
+  }
+
+  private static boolean isSymbolDefinedInBlockPredecessors(Symbol symbol, CfgBlock block, LiveVariablesAnalysis lva) {
+    for (CfgBlock predecessorBlock: block.predecessors()) {
+      if (lva.getLiveVariables(predecessorBlock).getKill().contains(symbol)) {
+        return true;
+      }
+      return isSymbolDefinedInBlockPredecessors(symbol, predecessorBlock, lva);
+    }
+
+    return false;
+  }
+
+  private void reportUndefinedVariable(Symbol symbol, Tree statementTree) {
+    // find the variable trees representing that symbol in the statement
+    VariablesFinder vf = new VariablesFinder(symbol, context().symbolTable());
+    vf.scanTree(statementTree);
+
+    if (vf.foundTrees.isEmpty()) {
+      return;
+    }
+
+    context().newIssue(this, vf.foundTrees.get(0), "Used and not defined");
+  }
+
+  private static class VariablesFinder extends PHPTreeSubscriber {
+    private Symbol symbol;
+    private SymbolTable symbolTable;
+    private List<Tree> foundTrees = new ArrayList<>();
+
+    private VariablesFinder(Symbol symbol, SymbolTable symbolTable) {
+      this.symbol = symbol;
+      this.symbolTable = symbolTable;
+    }
+
+    @Override
+    public List<Tree.Kind> nodesToVisit() {
+      return ImmutableList.of(Tree.Kind.VARIABLE_IDENTIFIER);
+    }
+
+    @Override
+    public void visitNode(Tree tree) {
+      if (symbolTable.getSymbol(tree) == symbol) {
+        foundTrees.add(tree);
+      }
+
+      super.visitNode(tree);
+    }
+  }
 }

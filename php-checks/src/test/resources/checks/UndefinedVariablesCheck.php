@@ -1,5 +1,12 @@
 <?php
 
 function foo() {
-  echo $a; // Noncompliant
+  global $a;
+  if (bla) {
+    $a = "abc";
+    echo $a;
+  } else {
+    echo $a; // Noncompliant {{Used and not defined}}
+//       ^^
+  }
 }
