@@ -21,15 +21,12 @@ package org.sonar.php.checks;
 
 import com.google.common.collect.ImmutableList;
 import org.sonar.php.cfg.LiveVariablesAnalysis;
-import org.sonar.php.checks.utils.CheckUtils;
-import org.sonar.php.tree.TreeUtils;
 import org.sonar.php.tree.symbols.Scope;
 import org.sonar.plugins.php.api.cfg.CfgBlock;
 import org.sonar.plugins.php.api.cfg.ControlFlowGraph;
 import org.sonar.plugins.php.api.symbols.Symbol;
 import org.sonar.plugins.php.api.symbols.SymbolTable;
 import org.sonar.plugins.php.api.tree.Tree;
-import org.sonar.plugins.php.api.tree.expression.VariableIdentifierTree;
 import org.sonar.plugins.php.api.tree.statement.GlobalStatementTree;
 import org.sonar.plugins.php.api.visitors.PHPSubscriptionCheck;
 import org.sonar.plugins.php.api.visitors.PHPTreeSubscriber;
@@ -43,7 +40,6 @@ import java.util.Set;
 
 public class UndefinedVariablesCheck extends PHPSubscriptionCheck {
   Map<CfgBlock, Symbol> cfgBlocksGlobalBinds = new HashMap<>();
-
 
   @Override
   public List<Tree.Kind> nodesToVisit() {
@@ -64,9 +60,7 @@ public class UndefinedVariablesCheck extends PHPSubscriptionCheck {
 
     LiveVariablesAnalysis lva = LiveVariablesAnalysis.analyze(cfg, context().symbolTable());
 
-    for (CfgBlock block: cfg.blocks()) {
-      checkBlock(block, lva);
-    }
+    recursiveCheckBlockAndSuccessors(cfg.start(), lva);
   }
 
   private void checkBlock(CfgBlock block, LiveVariablesAnalysis lva) {
@@ -77,6 +71,7 @@ public class UndefinedVariablesCheck extends PHPSubscriptionCheck {
         ((GlobalStatementTree)statement).variables().stream()
           .filter(v -> v.is(Tree.Kind.VARIABLE_IDENTIFIER))
           .forEach(v -> cfgBlocksGlobalBinds.put(block, context().symbolTable().getSymbol(v)));
+        continue;
       }
 
       Map<Symbol, LiveVariablesAnalysis.VariableUsage> usagesInElement = lva.getLiveVariables(block).getVariableUsages(statement);
@@ -91,15 +86,25 @@ public class UndefinedVariablesCheck extends PHPSubscriptionCheck {
     }
   }
 
-  private static boolean isSymbolDefinedInBlockPredecessors(Symbol symbol, CfgBlock block, LiveVariablesAnalysis lva) {
+  private boolean isSymbolDefinedInBlockPredecessors(Symbol symbol, CfgBlock block, LiveVariablesAnalysis lva) {
     for (CfgBlock predecessorBlock: block.predecessors()) {
-      if (lva.getLiveVariables(predecessorBlock).getKill().contains(symbol)) {
+      if (lva.getLiveVariables(predecessorBlock).getKill().contains(symbol) ||
+        cfgBlocksGlobalBinds.containsKey(predecessorBlock) && cfgBlocksGlobalBinds.get(predecessorBlock) == symbol) {
         return true;
       }
+
+
       return isSymbolDefinedInBlockPredecessors(symbol, predecessorBlock, lva);
     }
 
     return false;
+  }
+
+  private void recursiveCheckBlockAndSuccessors(CfgBlock block, LiveVariablesAnalysis lva) {
+    checkBlock(block, lva);
+    for (CfgBlock successorBlock: block.successors()) {
+      recursiveCheckBlockAndSuccessors(successorBlock, lva);
+    }
   }
 
   private void reportUndefinedVariable(Symbol symbol, Tree statementTree) {
