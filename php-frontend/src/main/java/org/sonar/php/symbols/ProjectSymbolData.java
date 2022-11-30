@@ -55,4 +55,12 @@ public class ProjectSymbolData {
   public List<FunctionSymbolData> functionSymbolData(QualifiedName qualifiedName) {
     return functionSymbolsByQualifiedName.getOrDefault(qualifiedName, Collections.emptyList());
   }
+
+  public Map<QualifiedName, ClassSymbolData> classSymbolsByQualifiedName() {
+    return classSymbolsByQualifiedName;
+  }
+
+  public Map<QualifiedName, List<FunctionSymbolData>> functionSymbolsByQualifiedName() {
+    return functionSymbolsByQualifiedName;
+  }
 }
